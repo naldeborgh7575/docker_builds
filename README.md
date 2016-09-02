@@ -1,2 +1,2 @@
 # Docker Builds
-A repo for automated docker builds on DockerHub
+A repo for automated builds on DockerHub
