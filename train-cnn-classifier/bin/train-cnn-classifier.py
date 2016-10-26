@@ -1,53 +1,64 @@
 import os, time, ast, shutil
 import json, geojson, geoio
 import numpy as np
-from glob import glob
+import subprocess
 from pool_net import PoolNet
 from mltools import geojson_tools as gt
 from mltools import data_extractors as de
 from gbdx_task_interface import GbdxTaskInterface
 
-start = time.time()
 
 class TrainCnnClassifier(GbdxTaskInterface):
 
-    def invoke(self):
+    def __init__(self):
+        '''
+        Instantiate string and data inputs, organize data for training
+        '''
+        GbdxTaskInterface.__init__(self)
 
         # Get string inputs
-        classes = [i.strip() for i in self.get_input_string_port('classes').split(',')]
-        two_rounds = ast.literal_eval(self.get_input_string_port('two_rounds', default='True'))
-        filter_geojson = ast.literal_eval(self.get_input_string_port('filter_geojson', default='True'))
-        min_side_dim = int(self.get_input_string_port('min_side_dim', default='10'))
-        max_side_dim = int(self.get_input_string_port('max_side_dim', default='125'))
-        train_size = int(self.get_input_string_port('train_size', default='10000'))
-        batch_size = int(self.get_input_string_port('batch_size', default='32'))
-        nb_epoch = int(self.get_input_string_port('nb_epoch', default='35'))
-        use_lowest_val_loss = ast.literal_eval(self.get_input_string_port('use_lowest_val_loss', default='True'))
-        nb_epoch_2 = int(self.get_input_string_port('nb_epoch_2', default='8'))
-        train_size_2 = int(self.get_input_string_port('train_size', default=int(0.5 * train_size)))
-        test = ast.literal_eval(self.get_input_string_port('test', default='True'))
-        test_size = int(self.get_input_string_port('test_size', default='5000'))
-        lr_1 = float(self.get_input_string_port('learning_rate', default='0.001'))
-        lr_2 = float(self.get_input_string_port('learning_rate_2', default='0.01'))
-        bit_depth = int(self.get_input_string_port('bit_depth', default='8'))
+        self.start = time.time()
+        self.classes = [i.strip() for i in self.get_input_string_port('classes').split(',')]
+        self.two_rounds = ast.literal_eval(self.get_input_string_port('two_rounds', default='True'))
+        self.filter_geojson = ast.literal_eval(self.get_input_string_port('filter_geojson', default='True'))
+        self.min_side_dim = int(self.get_input_string_port('min_side_dim', default='10'))
+        self.max_side_dim = int(self.get_input_string_port('max_side_dim', default='125'))
+        self.train_size = int(self.get_input_string_port('train_size', default='10000'))
+        self.batch_size = int(self.get_input_string_port('batch_size', default='32'))
+        self.nb_epoch = int(self.get_input_string_port('nb_epoch', default='35'))
+        self.use_lowest_val_loss = ast.literal_eval(self.get_input_string_port('use_lowest_val_loss', default='True'))
+        self.nb_epoch_2 = int(self.get_input_string_port('nb_epoch_2', default='8'))
+        self.train_size_2 = int(self.get_input_string_port('train_size_2', default=int(0.5 * self.train_size)))
+        self.test = ast.literal_eval(self.get_input_string_port('test', default='True'))
+        self.test_size = int(self.get_input_string_port('test_size', default='5000'))
+        self.lr_1 = float(self.get_input_string_port('learning_rate', default='0.001'))
+        self.lr_2 = float(self.get_input_string_port('learning_rate_2', default='0.01'))
+        self.bit_depth = int(self.get_input_string_port('bit_depth', default='8'))
+        self.kernel_size = int(self.get_input_string_port('kernel_size', default='3'))
+        self.small_model = ast.literal_eval(self.get_input_string_port('small_model', default='False'))
+        self.resize_dim = ast.literal_eval(self.get_input_string_port('resize_dim', default='None'))
+        print '\nString args loaded. Running for {} seconds'.format(str(time.time() - self.start))
 
-        print '\nString args loaded. Running for {} seconds'.format(str(time.time() - start))
+        # Get data input locations
+        self.geoj_dir = self.get_input_data_port('geojson')
+        self.img_dir = self.get_input_data_port('images')
 
-        # Get geojson input port
-        shp_dir = self.get_input_data_port('geojson')
-        shp_list = [f for f in os.listdir(shp_dir) if f[-8:] == '.geojson']
+        # Create necessary directories
+        self.trained_model, self.model_weights = self._create_directories()
+        geoj, self.bands = self._check_inputs()
+        shutil.copyfile(geoj, os.path.join(self.img_dir, 'orig_geojson.geojson'))
+        os.chdir(self.img_dir)
 
-        if len(shp_list) != 1:
-            raise Exception('Make sure there is exactly one geojson in image_dest s3 bucket')
 
-        shp = os.path.join(shp_dir, shp_list[0])
-
-        # Get image input port
-        img_dir = self.get_input_data_port('images')
-        os.makedirs(os.path.join(img_dir, 'models'))
-        imgs = [os.path.join(img_dir, img) for img in os.listdir(img_dir) if img[-4:] == '.tif']
-
-        # limit number of images to 5
+    def _check_inputs(self):
+        '''
+        Ensure proper composition of input directory ports and all images have same first
+            dimension.
+        Returns path to geojson file and number of bands used in imagery
+        '''
+        # Ensure proper number of images provided
+        in_img_dir = os.listdir(self.img_dir)
+        imgs = [img for img in in_img_dir if img.endswith('.tif')]
         if len(imgs) > 5:
             raise Exception('There are too many images in the input image directory. ' \
                             'Please use a maximum of five image strips.')
@@ -55,188 +66,233 @@ class TrainCnnClassifier(GbdxTaskInterface):
             raise Exception('No images were found in the input directory. Please ' \
                             'provide at lease one GeoTif image.')
 
-        # determine input shape
-        input_shape = [0,0,0]
-        input_shape[0] = geoio.GeoImage(imgs[0]).shape[0]
-        input_shape[1:] = [max_side_dim, max_side_dim]
+        # Ensure all images have same number of bands
+        bands = [geoio.GeoImage(os.path.join(self.img_dir, img)).shape[0] for img in imgs]
+        if not all(dim == bands[0] for dim in bands):
+            raise Exception('Please make sure all images have the same number of bands')
 
-        # Create output directories, organize file inputs
+        # Ensure only one geojson
+        geoj_list = [geoj for geoj in os.listdir(self.geoj_dir) if geoj.endswith('.geojson')]
+        if len(geoj_list) != 1:
+            raise Exception('Make sure there is exactly one geojson in image_dest s3 ' \
+                            'bucket')
+
+        return os.path.join(self.geoj_dir, geoj_list[0]), bands[0]
+
+
+    def _create_directories(self):
+        '''
+        Create output directory ports
+        '''
+        # Create models dir for training
+        os.makedirs(os.path.join(self.img_dir, 'models'))
+
+        # Create output directories
         trained_model = self.get_output_data_port('trained_model')
         model_weights = os.path.join(trained_model, 'model_weights')
-
         os.makedirs(trained_model)
         os.makedirs(model_weights)
+        os.makedirs(os.path.join(model_weights, 'round_1'))
+        if self.two_rounds:
+            os.makedirs(os.path.join(model_weights, 'round_2'))
 
-        os.rename(shp, os.path.join(img_dir, 'orig_geojson.geojson'))
-        shp = 'orig_geojson.geojson'
-        os.chdir(img_dir)
+        return trained_model, model_weights
 
-        print '\nOutput directories created. Running for {} seconds'.format(str(time.time() - start))
 
-        # Filter for appropriate polygon size
-        if filter_geojson:
-            gt.filter_polygon_size(shp, output_file = 'filtered_geojson.geojson',
-                                   min_polygon_hw = min_side_dim,
-                                   max_polygon_hw = max_side_dim)
-            shp = 'filtered_geojson.geojson'
-            print 'Polygons filtered. Running for {} seconds'.format(str(time.time() - start))
+    def make_tiled_images(self):
+        '''
+        Make images tiled using gdal translate. much faster when generating chips during
+            training.
+        '''
+        currdir = os.path.abspath('.')
 
-        # Check for number of remaining polygons
-        with open(shp) as f:
-            info = geojson.load(f)
-            feats = info['features']
-            poly_ct = len(feats)
+        # Navigate to image directory, get image list
+        os.chdir(self.img_dir)
+        imgs = [img for img in os.listdir('.') if img.endswith('.tif')]
 
-        # Set aside test data
-        train_test_prop = float(test_size) / poly_ct
-        poly_ct -= (train_test_prop * poly_ct)
+        for img in imgs:
+            cmd = 'gdal_translate -co TILED=YES {} {}_t.tif'.format(img, img.strip('.tif'))
+            subprocess.call(cmd, shell=True)
+            shutil.move('{}_t.tif'.format(img.strip('.tif')), img)
 
-        print '\nMaking train/test data from ' + str(shp)
-        gt.create_balanced_geojson(shp, output_file = 'filtered.geojson',
-                                   balanced = False, train_test = train_test_prop)
+        os.chdir(currdir)
 
-        # Create balanced train data
-        if two_rounds:
-            # Make balanced data for round one
-            gt.create_balanced_geojson('train_filtered.geojson',
-                                       output_file = 'train_balanced.geojson')
+    def prep_geojsons(self, geoj):
+        '''
+        Prep input geojson as follows: filter, split into train/test and create a
+            file with balanced classes (depending on input params)
+        '''
+        # Filter geojson
+        if self.filter_geojson:
+            gt.filter_polygon_size(geoj, output_file = 'filtered_geojson.geojson',
+                                   min_polygon_hw = self.min_side_dim,
+                                   max_polygon_hw = self.max_side_dim)
+            geoj = 'filtered_geojson.geojson'
 
-            # Establish number of remaining train polygons
-            with open('train_balanced.geojson') as f:
-                info = geojson.load(f)['features']
-                poly_ct = len(info)
+        # Create train/test data geojsons
+        if self.test:
+            gt.create_train_test(geoj, output_file='filtered.geojson',
+                                 test_size=self.test_size)
+            geoj = 'train_filtered.geojson'
 
-            inp = 'train_balanced.geojson'
+        # Create balanced datasets
+        if self.two_rounds:
+            gt.create_balanced_geojson(geoj, classes=self.classes,
+                                       output_file='train_balanced.geojson')
+            geoj = 'train_balanced.geojson'
 
-        else:
-            inp = 'train_filtered.geojson'
+        # Establish number of remaining train polygons
+        with open(geoj) as inp_file:
+            poly_ct = len(geojson.load(inp_file)['features'])
 
-        # Warn if not enough training data
-        if poly_ct < train_size:
+        if poly_ct < self.train_size:
             raise Exception('There are only {} polygons that can be used as training ' \
-                            'data, cannot train the network on {} samples. Please decrease' \
-                            ' train_size or provide more polygons.'.format(str(poly_ct), str(train_size)))
+                            'data, cannot train the network on {} samples. Please ' \
+                            'decrease train_size or provide more ' \
+                            'polygons.'.format(str(poly_ct), str(self.train_size)))
 
-        print 'Ready to create network instance and train network. Running for {}' \
-              ' seconds.\n'.format(str(time.time() - start))
+        # Return name of input file
+        return geoj
 
-        # Create instance of PoolNet
-        p = PoolNet(classes=classes, batch_size=batch_size, input_shape=input_shape,
-                    min_chip_hw=min_side_dim, max_chip_hw=max_side_dim, learning_rate=lr_1,
-                    bit_depth=bit_depth)
 
-        # Fit network in large batches
-        print 'training network...'
-        if train_size < 5000:
-            batches_per_epoch = 1
-            chips_per_batch = train_size
+    def fit_model(self, model, inp_geojson, rnd, **kwargs):
+        '''
+        Fit model
+        '''
+
+        # Get nb_epoch and train_size params
+        if rnd == 2:
+            nb_epoch, train_size = self.nb_epoch_2, self.train_size_2
         else:
-            batches_per_epoch = int(train_size / 5000.)
-            chips_per_batch = 5000
+            nb_epoch, train_size = self.nb_epoch, self.train_size
 
-        hist = p.fit_from_geojson(inp, chips_per_batch=chips_per_batch, return_history=True,
-                           batches_per_epoch=batches_per_epoch, nb_epoch=nb_epoch,
-                           validation_split=0.1)
-        print 'First round of training complete. Running for {} seconds'.format(str(time.time() - start))
+        if train_size < 1000:
+            batches_per_epoch, chips_per_batch = 1, train_size
+        else:
+            batches_per_epoch, chips_per_batch = int(train_size / 1000.), 1000
+
+        try:
+            hist = model.fit_from_geojson(inp_geojson, nb_epoch=nb_epoch,
+                                          resize_dim=self.resize_dim, validation_split=0.1,
+                                          return_history=True,
+                                          chips_per_batch=chips_per_batch,
+                                          batches_per_epoch=batches_per_epoch,
+                                          **kwargs)
+        except (MemoryError):
+            raise Exception('Model does not fit in memory. Plase try one or more of '\
+                            'the following:\n' \
+                            '- Use resize_dim to downsample chips. Input images should '\
+                            'be no larger than 250px \n' \
+                            '- Use a smaller batch_size \n' \
+                            '- Set the small_model flag to True')
+
+        # Save weights to ouptput dir
+        save_path = os.path.join(self.model_weights, 'round_{}'.format(str(rnd)))
+        for weights in os.listdir('models/'):
+            shutil.copy('models/' + weights, save_path)
+        return model, hist
+
+
+    def test_net(self, model):
+        '''
+        Get accuracy metrics for test data, save to test_report.txt
+        '''
+
+        y_pred, y_true = [], []
+        with open('test_filtered.geojson') as f:
+            test_data = geojson.load(f)['features']
+
+        for polygon_ix in xrange(0, self.test_size, 1000):
+            x, y = de.get_data_from_polygon_list(test_data[polygon_ix: polygon_ix + 1000],
+                                                 max_chip_hw = self.max_side_dim,
+                                                 classes=self.classes,
+                                                 bit_depth=self.bit_depth,
+                                                 resize_dim=self.resize_dim)
+
+            y_pred += list(model.model.predict_classes(x))
+            y_true += [int(clss[1]) for clss in y]
+
+        test_size = len(y_true)
+        y_pred, y_true = np.array(y_pred), np.array(y_true)
+        wrong, right = np.argwhere(y_pred != y_true), np.argwhere(y_pred == y_true)
+        fp = int(np.sum([y_pred[i] for i in wrong]))
+        tp = int(np.sum([y_pred[i] for i in right]))
+        fn, tn = int(len(wrong) - fp), int(len(right) - tp)
+
+        # get accuracy metrics
+        try:
+            precision = float(tp) / (tp + fp)
+        except (ZeroDivisionError):
+            precision = 'N/A'
+        try:
+            recall = float(tp)/(tp + fn)
+        except (ZeroDivisionError):
+            recall = 'N/A'
+
+        test_report = 'Test size: ' + str(test_size) + \
+                      '\nFalse Positives: ' + str(fp) + \
+                      '\nFalse Negatives: ' + str(fn) + \
+                      '\nPrecision: ' + str(precision) + \
+                      '\nRecall: ' + str(recall) + \
+                      '\nAccuracy: ' + str(float(len(right))/test_size)
+        print test_report
+
+        # Record test results
+        with open(os.path.join(self.trained_model, 'test_report.txt'), 'w') as tr:
+            tr.write(test_report)
+
+
+    def invoke(self):
+        '''
+        Execute task
+        '''
+
+        # Determine input shape
+        if self.resize_dim:
+            input_shape = self.resize_dim
+        else:
+            input_shape = [self.bands, self.max_side_dim, self.max_side_dim]
+
+        # Prep geojson for training
+        inp = self.prep_geojsons('orig_geojson.geojson')
+
+        # Training round 1
+        p = PoolNet(classes=self.classes, batch_size=self.batch_size,
+                    input_shape=input_shape, min_chip_hw=self.min_side_dim,
+                    max_chip_hw=self.max_side_dim, learning_rate=self.lr_1,
+                    bit_depth=self.bit_depth, kernel_size=self.kernel_size,
+                    small_model=self.small_model)
+
+        p, hist = self.fit_model(model=p, inp_geojson=inp, rnd=1)
 
         # Find lowest val_loss, load weights
-        if use_lowest_val_loss:
+        if self.use_lowest_val_loss:
             val_losses = [epoch['val_loss'][0] for epoch in hist]
             min_epoch = np.argmin(val_losses)
             min_loss = val_losses[min_epoch]
-            print '\nAll validation losses: ' + str(val_losses)
-            print 'min validation loss: ' + str(min_loss)
             min_weights = 'models/epoch' + str(min_epoch) + '_{0:.2f}.h5'.format(min_loss)
-            print 'loading weights from: ' + min_weights
             p.model.load_weights(min_weights)
-            print 'weights with lowest val loss now loaded'
 
-        # Move model weights to output directory
-        os.makedirs(os.path.join(model_weights, 'round_1'))
-        weights = os.listdir('models/')
-        for weights_file in weights:
-            shutil.move('models/' + weights_file, os.path.join(model_weights, 'round_1'))
+        # Training round 2
+        if self.two_rounds:
+            # Remove old models
+            mod_list = os.listdir('models')
+            for mod in mod_list:
+                os.remove(os.path.join('models', mod))
 
-        # Retrain model
-        if two_rounds:
-            print 'training round 2...'
-            if train_size_2 < 5000:
-                batches_per_epoch = 1
-                chips_per_batch = train_size_2
-            else:
-                batches_per_epoch = int(train_size_2 / 5000.)
-                chips_per_batch = 5000
+            p, _ = self.fit_model(model=p, inp_geojson='train_filtered.geojson', rnd=2,
+                                  retrain=True, lr_2 = self.lr_2)
 
-            p.fit_from_geojson('train_filtered.geojson', chips_per_batch=chips_per_batch,
-                               nb_epoch=nb_epoch_2, batches_per_epoch=batches_per_epoch,
-                               validation_split=0.1)
-            print 'Second round of training complete. Running for {} seconds'.format(str(time.time() - start))
-
-            # Move model weights to output dir
-            os.makedirs(os.path.join(model_weights, 'round_2'))
-            weights = os.listdir('models/')
-
-            for weights_file in weights:
-                shutil.move('models/' + weights_file,
-                            os.path.join(model_weights, 'round_2'))
-
-        # Test Net
-        if test:
-            print 'Generating test data...'
-            test_gen = de.getIterData('test_filtered.geojson', batch_size=test_size,
-                                      min_chip_hw=min_side_dim, max_chip_hw=max_side_dim,
-                                      bit_depth=bit_depth, show_percentage=False)
-
-            print 'predicting classes of test data...'
-            x, y = test_gen.next()
-
-            y_pred = p.model.predict_classes(x)
-            ytrue = [i[1] for i in y]
-            print 'getting test metrics:'
-            test_size = len(y)
-            print 'test size: ' + str(test_size)
-            wrong, right = np.argwhere(y_pred != ytrue), np.argwhere(y_pred == ytrue)
-            print '{} incorrectly classified, {} correctly classified'.format(str(len(wrong)), str(len(right)))
-            fp = int(np.sum([y_pred[i] for i in wrong]))
-            print 'fp: ' + str(fp)
-            tp = int(np.sum([y_pred[i] for i in right]))
-            print 'tp: ' + str(tp)
-            fn, tn = int(len(wrong) - fp), int(len(right) - tp)
-
-            # get accuracy metrics
-            try:
-                precision = float(tp) / (tp + fp)
-            except (ZeroDivisionError):
-                precision = 'N/A'
-            try:
-                recall = float(tp)/(tp + fn)
-            except (ZeroDivisionError):
-                recall = 'N/A'
-
-            print 'fn, tn: ' + str(fn) + ' ' + str(tn)
-            test_report = 'Test size: ' + str(test_size) + \
-                          '\nFalse Positives: ' + str(fp) + \
-                          '\nFalse Negatives: ' + str(fn) + \
-                          '\nPrecision: ' + str(precision) + \
-                          '\nRecall: ' + str(recall) + \
-                          '\nAccuracy: ' + str(float(len(right))/test_size)
-            print test_report
-
-            # Record test results
-            print 'writing test report file...'
-            with open(os.path.join(trained_model, 'test_report.txt'), 'w') as tr:
-                tr.write(test_report)
-            print 'Testing complete. Running for {} seconds'.format(str(time.time() - start))
+        # Test network
+        if self.test:
+            self.test_net(model=p)
 
         # Save model architecture and weights to output directory
-        os.chdir(trained_model)
+        os.chdir(self.trained_model)
         json_str = p.model.to_json()
         p.model.save_weights('model_weights.h5')
         with open('model_architecture.json', 'w') as arch:
             json.dump(json_str, arch)
-
-        print 'Total run time: ' + str(time.time() - start)
-
 
 
 if __name__ == '__main__':
