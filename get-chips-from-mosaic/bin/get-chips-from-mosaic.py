@@ -1,8 +1,8 @@
-# gbdx.Task(get-chips-from-mosaic, geojson, bucket_name,  project_name, aws_access_key, aws_secret_key)
+# gbdx.Task(get-chips-from-mosaic, geojson, bucket_name,  mosaic_location, aws_access_key, aws_secret_key)
 
 ## ASSUMPTIONS ##
 # mosaic data strux will be consistent
-# mosaic saved as bucket_name/project_name
+# mosaic saved as bucket_name/mosaic_location
 # appropriate vrt shapefile located at .../wms/vsitindex_z12.shp
 
 import logging
@@ -50,7 +50,7 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         self.bucket = self.get_input_string_port('bucket_name')
         logging.info('bucket name: ' + self.bucket)
 
-        self.mosaic = self.get_input_string_port('project_name')
+        self.mosaic = self.get_input_string_port('mosaic_location')
         logging.info('mosaic: ' + self.mosaic)
 
         self.a_key = self.get_input_string_port('aws_access_key', default=None)
