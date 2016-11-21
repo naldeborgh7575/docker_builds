@@ -1,4 +1,4 @@
-# gbdx.Task(get-chips-from-mosaic, geojson, bucket_name,  mosaic_location, aws_access_key, aws_secret_key)
+# gbdx.Task(get-chips-from-mosaic, geojson, bucket_name,  mosaic_location, aws_access_key, aws_secret_key, min_side_dim, max_side_dim)
 
 ## ASSUMPTIONS ##
 # mosaic data strux will be consistent
@@ -8,7 +8,10 @@
 import logging
 import geojson
 import subprocess, os
-from multiprocessing import Pool, cpu_count
+
+from functools import partial
+from osgeo import gdal
+from multiprocessing import Pool, Process, cpu_count
 from gbdx_task_interface import GbdxTaskInterface
 
 # log file for debugging
@@ -20,6 +23,47 @@ def execute_command(cmd):
         multiprocessing.Pool on a class methods.
     '''
     subprocess.call(cmd, shell=True)
+
+def check_mask_chip(feature, min_side_dim=0, max_side_dim=None, mask=False):
+    '''
+    check a chip for appropriate size. This is outside of the class because you cannot
+        use multiprocessing.Pool on a class methods.
+    '''
+
+    if not (max_side_dim or min_side_dim or mask):
+        return True
+
+    # Open chip in gdal
+    chip_name = str(feature['properties']['feature_id']) + '.tif'
+    chip = gdal.Open(chip_name)
+
+    min_side = min(chip.RasterXSize, chip.RasterYSize)
+    max_side = max(chip.RasterXSize, chip.RasterYSize)
+
+    # Close chip
+    chip = None
+
+    # Remove chip if too small or large
+    if max_side_dim or (min_side_dim > 0):
+        if min_side < min_side_dim or max_side > max_side_dim:
+            os.remove(chip_name)
+            os.remove(chip_name + '.msk')
+            return True
+
+    # Mask area outside polygon
+    if mask:
+        vectordata = {'type': 'FeatureCollection', 'features': [feature]}
+        fn = chip_name.strip('.tif') + '.geojson'
+
+        # Save polygon to ogr format
+        with open(fn, 'wb') as f:
+            geojson.dump(vectordata, f)
+
+        # Mask raster
+        cmd = 'gdal_rasterize -i -b 1 -b 2 -b 3 -burn 0 -burn 0 -burn 0 {} {}'.format(fn, chip_name)
+        subprocess.call(cmd, shell=True)
+
+        os.remove(fn)
 
 
 class GetChipsFromMosaic(GbdxTaskInterface):
@@ -33,6 +77,7 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         '''
         GbdxTaskInterface.__init__(self)
         self.execute_command = execute_command
+        self.check_mask_chip = check_mask_chip
 
         self.geojson_dir = self.get_input_data_port('geojson')
         self.geojsons = [f for f in os.listdir(self.geojson_dir) if f.endswith('.geojson')]
@@ -53,6 +98,13 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         self.mosaic = self.get_input_string_port('mosaic_location')
         logging.info('mosaic: ' + self.mosaic)
 
+        self.min_side_dim = int(self.get_input_string_port('min_side_dim', default = '0'))
+        logging.info('min_side_dim: ' + str(self.min_side_dim))
+
+        self.max_side_dim = int(self.get_input_string_port('max_side_dim', default = 'None'))
+        logging.info('max_side_dim: ' + str(self.max_side_dim))
+
+        self.mask = bool(self.get_input_string_port('mask', default='False'))
         self.a_key = self.get_input_string_port('aws_access_key', default=None)
         self.s_key = self.get_input_string_port('aws_secret_key', default=None)
 
@@ -112,7 +164,8 @@ class GetChipsFromMosaic(GbdxTaskInterface):
             gdal_cmds.append(cmd)
             logging.info(cmd)
 
-        return gdal_cmds
+        return gdal_cmds, feature_collection
+
 
     def invoke(self):
 
@@ -120,14 +173,25 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         vrt_file = self.create_vrt()
 
         # Create commands for extracting chips
-        cmds = self.get_gdal_translate_cmds(vrt_file)
+        cmds, feature_collection = self.get_gdal_translate_cmds(vrt_file)
 
-        # Execute commands in parallel
+        # Execute gdal_translate commands in parallel
         p = Pool(cpu_count())
         p.map(self.execute_command, cmds)
         p.close()
         p.join()
 
+        # Check chip size and mask
+        os.chdir('mnt/work/output/chips')
+
+        p = Pool(cpu_count())
+        part_check = partial(self.check_mask_chip, min_side_dim=self.min_side_dim,
+                             max_side_dim=self.max_side_dim, mask=self.mask)
+        p.map(part_check, feature_collection)
+        p.close()
+        p.join()
+
+        os.chdir('../../../..')
 
 
 if __name__ == '__main__':
