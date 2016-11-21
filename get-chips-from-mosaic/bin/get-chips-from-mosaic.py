@@ -11,6 +11,7 @@ import subprocess, os
 
 from functools import partial
 from osgeo import gdal
+from shutil import copyfile
 from multiprocessing import Pool, Process, cpu_count
 from gbdx_task_interface import GbdxTaskInterface
 
@@ -169,15 +170,32 @@ class GetChipsFromMosaic(GbdxTaskInterface):
 
     def generate_feature_ids(self, feature_collection):
 
+        '''
+        Create a unique feature id for each geometry in a feature collection, save the
+            new feature collection in a geojson to the output directory
+        '''
+
         fid = 0
         for feat in feature_collection:
             feat['properties']['feature_id'] = fid
             fid += 1
 
+        # Update input geojson with feature ids
+        with open(self.geojson) as f:
+            data = geojson.load(f)
+            data['features'] = feature_collection
+
+        with open(self.geojson, 'w') as f:
+            geojson.dump(data, f)
+
         return feature_collection
 
 
     def invoke(self):
+
+        '''
+        run task
+        '''
 
         # Create VRT as a pointer to mosiac tiles on S3
         vrt_file = self.create_vrt()
@@ -203,6 +221,9 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         p.map(part_check, feature_collection)
         p.close()
         p.join()
+
+        # Save geojson with reference feature ids to output directory
+        copyfile(self.geojson, self.out_dir)
 
 
 if __name__ == '__main__':
