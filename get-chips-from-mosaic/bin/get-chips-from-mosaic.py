@@ -167,6 +167,16 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         return gdal_cmds, feature_collection
 
 
+    def generate_feature_ids(self, feature_collection):
+
+        fid = 0
+        for feat in feature_collection:
+            feat['properties']['feature_id'] = fid
+            fid += 1
+
+        return feature_collection
+
+
     def invoke(self):
 
         # Create VRT as a pointer to mosiac tiles on S3
@@ -175,6 +185,9 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         # Create commands for extracting chips
         cmds, feature_collection = self.get_gdal_translate_cmds(vrt_file)
 
+        if not feature_collection[0]['properties']['feature_id']:
+            feature_collection = self.generate_feature_ids(feature_collection)
+
         # Execute gdal_translate commands in parallel
         p = Pool(cpu_count())
         p.map(self.execute_command, cmds)
@@ -182,7 +195,7 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         p.join()
 
         # Check chip size and mask
-        os.chdir('mnt/work/output/chips')
+        os.chdir('/mnt/work/output/chips')
 
         p = Pool(cpu_count())
         part_check = partial(self.check_mask_chip, min_side_dim=self.min_side_dim,
@@ -190,8 +203,6 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         p.map(part_check, feature_collection)
         p.close()
         p.join()
-
-        os.chdir('../../../..')
 
 
 if __name__ == '__main__':
