@@ -4,6 +4,7 @@
 # mosaic data strux will be consistent
 # mosaic saved as bucket_name/mosaic_location
 # appropriate vrt shapefile located at .../wms/vsitindex_z12.shp
+# if chips are for training geojson must have class_name
 
 import logging
 import geojson
@@ -141,16 +142,11 @@ class GetChipsFromMosaic(GbdxTaskInterface):
             raise Exception('VRT could not be created. Make sure AWS credentials are accurate and vsitindex_z12.shp is in the project/wms/ location')
 
 
-    def get_gdal_translate_cmds(self, vrt_file):
+    def get_gdal_translate_cmds(self, vrt_file, feature_collection):
         '''
         Generate commands for extracting each chip
         '''
         gdal_cmds = []
-
-        # get features to extract
-        with open(self.geojson) as f:
-            feature_collection = geojson.load(f)['features']
-            logging.info('{} features loaded'.format(str(len(feature_collection))))
 
         for feat in feature_collection:
             # get bounding box of input polygon
@@ -165,7 +161,7 @@ class GetChipsFromMosaic(GbdxTaskInterface):
             gdal_cmds.append(cmd)
             logging.info(cmd)
 
-        return gdal_cmds, feature_collection
+        return gdal_cmds
 
 
     def generate_feature_ids(self, feature_collection):
@@ -176,8 +172,8 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         '''
 
         fid = 0
-        for feat in feature_collection:
-            feat['properties']['feature_id'] = fid
+        for feat in xrange(len(feature_collection)):
+            feature_collection[feat]['properties']['feature_id'] = fid
             fid += 1
 
         # Update input geojson with feature ids
@@ -191,20 +187,46 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         return feature_collection
 
 
+    def get_ref_geojson(self, open_geoj):
+        '''
+        create a geojson with only features in chips output directory
+        '''
+        # Get list of feature_ids in output directory
+        chips = [f.strip('.tif') for f in os.listdir('.') if f.endswith('.tif')]
+        feature_collection = open_geoj['features']
+        valid_feats = []
+
+        for feat in feature_collection:
+            if str(feat['properties']['feature_id']) in chips:
+                valid_feats.append(feat)
+
+        open_geoj['features'] = valid_feats
+
+        with open('ref.geojson', 'wb') as f:
+            geojson.dump(open_geoj, f)
+
+
     def invoke(self):
 
         '''
         run task
         '''
 
+        with open(self.geojson) as f:
+            data = geojson.load(f)
+            feature_collection = data['features']
+            logging.info('{} features loaded'.format(str(len(feature_collection))))
+
         # Create VRT as a pointer to mosiac tiles on S3
         vrt_file = self.create_vrt()
 
-        # Create commands for extracting chips
-        cmds, feature_collection = self.get_gdal_translate_cmds(vrt_file)
-
-        if not feature_collection[0]['properties']['feature_id']:
+        # Generate feature ids if not provided
+        if 'feature_id' not in  feature_collection[0]['properties'].keys():
+            logging.info('Created feature ids')
             feature_collection = self.generate_feature_ids(feature_collection)
+
+        # Create commands for extracting chips
+        cmds = self.get_gdal_translate_cmds(vrt_file, feature_collection)
 
         # Execute gdal_translate commands in parallel
         p = Pool(cpu_count())
@@ -213,7 +235,7 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         p.join()
 
         # Check chip size and mask
-        os.chdir('/mnt/work/output/chips')
+        os.chdir('/mnt/work/output/chips/')
 
         p = Pool(cpu_count())
         part_check = partial(self.check_mask_chip, min_side_dim=self.min_side_dim,
@@ -222,8 +244,8 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         p.close()
         p.join()
 
-        # Save geojson with reference feature ids to output directory
-        copyfile(self.geojson, self.out_dir)
+        # Save reference geojson
+        self.get_ref_geojson(data)
 
 
 if __name__ == '__main__':
