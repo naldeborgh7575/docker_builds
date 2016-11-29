@@ -13,10 +13,11 @@ import geojson, json
 import subprocess
 import os, ast, re
 
+from glob import glob
 from functools import partial
 from osgeo import gdal
 from shutil import copyfile
-from multiprocessing import Pool, Process, cpu_count
+from multiprocessing import Pool, cpu_count
 from gbdx_task_interface import GbdxTaskInterface
 
 # log file for debugging
@@ -234,8 +235,8 @@ class GetChipsFromMosaic(GbdxTaskInterface):
         p.join()
 
         ##### Mask chips in parallel
+        os.chdir(self.out_dir) # !!!! Now in output directory !!!!
         if self.mask:
-            os.chdir(self.out_dir) # !!!! Now in output directory
             p = Pool(cpu_count())
             p.map(self.mask_chip, feature_collection)
             p.close()
@@ -243,6 +244,10 @@ class GetChipsFromMosaic(GbdxTaskInterface):
 
         ##### Create output geojson for feature_id reference
         self.get_ref_geojson(data)
+
+        ##### Remove msk files
+        for fl in glob('*.msk'):
+            os.remove(fl)
 
 
 if __name__ == '__main__':
