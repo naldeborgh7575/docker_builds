@@ -52,7 +52,7 @@ def mask_chip(feature):
         geojson.dump(vectordata, f)
 
     # Mask raster
-    cmd = 'gdal_rasterize -i -b 1 -b 2 -b 3 -burn 0 -burn 0 -burn 0 {} {}'.format(fn, chip_name)
+    cmd = 'gdal_rasterize -q -i -b 1 -b 2 -b 3 -burn 0 -burn 0 -burn 0 {} {}'.format(fn, chip_name)
     subprocess.call(cmd, shell=True)
 
     # Remove ogr vector file
@@ -181,7 +181,7 @@ class GetChipsFromMosaic(GbdxTaskInterface):
 
             # format gdal_translate command
             out_loc = os.path.join(self.out_dir, str(f_id) + '.tif')
-            cmd = 'gdal_translate -eco -projwin {0} {1} {2} {3} {4} {5}'.format(str(ulx), str(uly), str(lrx), str(lry), vrt_file, out_loc)
+            cmd = 'gdal_translate -eco -q -projwin {0} {1} {2} {3} {4} {5}'.format(str(ulx), str(uly), str(lrx), str(lry), vrt_file, out_loc)
             gdal_cmds.append(cmd)
             logging.info(cmd)
 
