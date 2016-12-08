@@ -42,11 +42,11 @@ def mask_chip(feature):
         'feature_id.tif' and exist in the current working directory.
     '''
     chip_name = str(feature['properties']['feature_id']) + '.tif'
+    fn = str(feature['properties']['feature_id']) + '.geojson'
     chip = gdal.Open(chip_name)
 
     # Create ogr vector file for gdal_rasterize
     vectordata = {'type': 'FeatureCollection', 'features': [feature]}
-    fn = re.sub(r'\.tif$', '.geojson', chip_name)
 
     with open(fn, 'wb') as f:
         geojson.dump(vectordata, f)
